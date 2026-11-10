@@ -1,0 +1,27 @@
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.pornhub.com	TRUE	/	TRUE	1792059758	ua	95579e9093ffdc0626a0f044fc254a2f
+.pornhub.com	TRUE	/	TRUE	1792578158	platform	pc
+.pornhub.com	TRUE	/	TRUE	1823509358	ss	269356959014825079
+.pornhub.com	TRUE	/	TRUE	1823509358	sessid	555307156156898470
+.pornhub.com	TRUE	/	TRUE	1794565358	comp_detect-cookies	56986.100000
+.pornhub.com	TRUE	/	TRUE	1794565358	fg_afaf12e314c5419a855ddc0bf120670f	92242.100000
+.pornhub.com	TRUE	/	TRUE	1794565358	fg_55e3b6f0afd46366d6fa797544b15af2	66914.100000
+.pornhub.com	TRUE	/	TRUE	1794565358	fg_7e663154ded3d3eac4af77cfff94b32a	55013.100000
+.pornhub.com	TRUE	/	TRUE	1794565358	fg_41b1995ee5530001895f2da326e410dd	15250.100000
+.pornhub.com	TRUE	/	TRUE	1794565358	fg_7d31324eedb583147b6dcbea0051c868	19684.100000
+.pornhub.com	TRUE	/	TRUE	0	__s	6ACF57ED-42FE722901BB60F14-EE0E3DB
+.pornhub.com	TRUE	/	TRUE	1823530284	__l	6ACF57ED-42FE722901BB60F14-EE0E3DB
+.pornhub.com	TRUE	/	FALSE	1791976961	accessAgeDisclaimerPH	2
+.pornhub.com	TRUE	/	FALSE	1826533509	_ga	GA1.1.28350059.1791973361
+.pornhub.com	TRUE	/	FALSE	1807525361	g_state	{"i_l":0,"i_ll":1791973361719,"i_b":"AbidWijthTs7U21suCSPP9nJFKw7Wv/0xifEKHF9pSw","i_e":{"enable_itp_optimization":24},"i_et":1791973361719}
+.pornhub.com	TRUE	/	TRUE	1823509462	cookieConsent	3
+.pornhub.com	TRUE	/	TRUE	1792059862	desired_username	d90a239%7Csskklsajjad%40gmail.com
+.pornhub.com	TRUE	/	TRUE	1807784662	il	v1jFvmiw3H77LytpYxo-3RLNYSc0WAmdUtp_ZAvqmBSdgxODA3Nzg0NjYyeS16ZVBEUUM5azhfSzZvQ1hNdW1iSG4yQk12d0JQQ2E2WFNjX2JleA..
+.pornhub.com	TRUE	/	TRUE	1823509462	bs	68d9babb4d7e6f7a4db890cd6cfa09fd
+.pornhub.com	TRUE	/	TRUE	1823509462	bsdd	68d9babb4d7e6f7a4db890cd6cfa09fd
+.pornhub.com	TRUE	/	TRUE	1823509462	vlc	363524602873701441
+.pornhub.com	TRUE	/	FALSE	1826533509	_ga_B39RFFWGYY	GS2.1.s1791973360$o1$g1$t1791973508$j8$l0$h0
+www.pornhub.com	FALSE	/	FALSE	0	rp	1276461019:yDxbYY+92LU=

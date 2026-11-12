@@ -310,49 +310,193 @@ async def _thumb(video: Path, out: Path) -> Optional[Path]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Container health check + lossless repair
+# --------------------------------------------------------------------------- #
+MAX_KEY_GAP = 12.0     # seconds: a longer gap between keyframes makes seeking jump back to the start
+MAX_START = 0.05       # seconds: video/audio must start at ~0, otherwise players drift or refuse to seek
+
+
+def _mp4_layout(path: Path) -> Optional[tuple[bool, bool]]:
+    """Read the top-level boxes of an MP4: -> (faststart, fragmented), or None when it is not an ISO MP4.
+
+    faststart  = the `moov` box (the time index) comes BEFORE `mdat` (the data). Without it Telegram and
+                 gallery apps must read the whole file before they can seek, and seeking snaps back to 0.
+    fragmented = the file is made of `moof` fragments (DASH/HLS style) and has no full index.
+    """
+    boxes: list[bytes] = []
+    try:
+        total = path.stat().st_size
+        with path.open("rb") as f:
+            pos = 0
+            while pos + 8 <= total and len(boxes) < 200:
+                f.seek(pos)
+                head = f.read(16)
+                if len(head) < 8:
+                    break
+                size, kind = int.from_bytes(head[:4], "big"), head[4:8]
+                if size == 1 and len(head) >= 16:
+                    size = int.from_bytes(head[8:16], "big")
+                elif size == 0:
+                    size = total - pos
+                boxes.append(kind)
+                if size < 8:
+                    break
+                pos += size
+    except OSError:
+        return None
+    if not boxes or boxes[0] not in (b"ftyp", b"styp") or b"moov" not in boxes:
+        return None
+    moov = boxes.index(b"moov")
+    mdat = boxes.index(b"mdat") if b"mdat" in boxes else len(boxes)
+    return moov < mdat, b"moof" in boxes
+
+
+def _container_problems(src: Path, probe: dict, v: dict, a: dict, dur: Optional[int]) -> list[str]:
+    """Everything that can make a codec-wise fine file badly playable. Empty list = clean."""
+    problems: list[str] = []
+    layout = _mp4_layout(src) if src.suffix.lower() == ".mp4" else None
+    if layout is None:
+        problems.append("not a plain MP4 container")
+    else:
+        faststart, fragmented = layout
+        if not faststart:
+            problems.append("moov index is at the END of the file (no faststart)")
+        if fragmented:
+            problems.append("fragmented MP4 (moof)")
+    vs = _num(v.get("start_time"))
+    as_ = _num(a.get("start_time")) if a else None
+    if vs is not None and abs(vs) > MAX_START:
+        problems.append(f"video starts at {vs:.3f}s instead of 0")
+    if as_ is not None and abs(as_) > MAX_START:
+        problems.append(f"audio starts at {as_:.3f}s instead of 0")
+    if vs is not None and as_ is not None and abs(vs - as_) > 0.5:
+        problems.append(f"audio/video start offset {abs(vs - as_):.2f}s")
+    if not dur:
+        problems.append("no duration in the index")
+    return problems
+
+
+def _num(v) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _max_key_gap(path: Path, duration: Optional[float]) -> Optional[float]:
+    """Longest distance (s) between two seekable keyframes of the video stream (packets only: fast)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+    except OSError:
+        return None
+    keys: list[float] = []
+    for line in out.decode(errors="ignore").splitlines():
+        t, _, flags = line.partition(",")
+        if "K" in flags:
+            tv = _num(t)
+            if tv is not None:
+                keys.append(tv)
+    if not keys:
+        return None
+    keys.sort()
+    gaps = [b - a for a, b in zip(keys, keys[1:])]
+    if duration:
+        gaps.append(max(0.0, duration - keys[-1]))
+    return max(gaps) if gaps else (duration or 0.0)
+
+
+async def _lossless_remux(src: Path, out: Path) -> bool:
+    """Rewrite the container only (-c copy): same picture and sound, clean timestamps, moov first."""
+    try:
+        await run_ffmpeg(
+            "-fflags", "+genpts", "-i", str(src),
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_chapters", "-1",
+            "-c", "copy", "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart", "-f", "mp4", str(out),
+        )
+    except RuntimeError as exc:
+        log.warning("lossless remux failed: %s", exc)
+        return False
+    return out.is_file() and out.stat().st_size > 0
+
+
+async def _transcode(src: Path, out: Path, *, keyframes: bool) -> bool:
+    """Last resort (incompatible codec, or a video with practically no keyframes)."""
+    args = ["-i", str(src), "-map", "0:v:0", "-map", "0:a:0?", "-map_chapters", "-1", "-vf",
+            "scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-threads", "2", "-pix_fmt", "yuv420p"]
+    if keyframes:   # a keyframe every 2 seconds = precise seeking
+        args += ["-force_key_frames", "expr:gte(t,n_forced*2)"]
+    args += ["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4", str(out)]
+    try:
+        async with TRANSCODE_SEM:
+            await run_ffmpeg(*args)
+    except RuntimeError as exc:
+        log.warning("re-encode failed: %s", exc)
+        return False
+    return out.is_file() and out.stat().st_size > 0
+
+
 async def prepare(src: Path, workdir: Path) -> LocalMedia:
-    """Make the video Telegram-friendly with as little work as possible."""
-    v, a, w, h, dur = _streams(await _probe(src))
+    """Make the video Telegram-friendly: a healthy, seekable MP4 with as little work as possible.
+
+    1. Codecs fine AND the container is healthy (moov first, not fragmented, starts at 0, has a duration)
+       -> sent untouched.
+    2. Codecs fine but the container is not (typical for HLS/DASH sites) -> lossless remux (`-c copy`):
+       no quality loss, takes a moment.
+    3. Remuxed file still has huge gaps between keyframes (seeking would jump back) or the codec is not
+       supported by Telegram -> re-encode (rare).
+    """
+    probe = await _probe(src)
+    v, a, w, h, dur = _streams(probe)
     if not v:
         raise ScError("فایل ویدیویی معتبر نیست.")
     log.info("video %s: v=%s a=%s pix=%s %sx%s", src.name, v.get("codec_name"),
              a.get("codec_name"), v.get("pix_fmt"), w, h)
 
-    ok = (v.get("codec_name") == "h264" and v.get("pix_fmt") in ("yuv420p", "yuvj420p")
-          and a.get("codec_name") in (None, "aac", "mp3"))
+    codecs_ok = (v.get("codec_name") == "h264" and v.get("pix_fmt") in ("yuv420p", "yuvj420p")
+                 and a.get("codec_name") in (None, "aac", "mp3"))
+    problems = _container_problems(src, probe, v, a, dur) if codecs_ok else ["codec not supported by Telegram"]
     out, changed = src, False
-    if ok and src.suffix.lower() == ".mp4":
-        thumb_task = asyncio.create_task(_thumb(src, workdir / "t1.jpg"))  # nothing to convert
-    else:
+
+    if problems:
+        log.info("video %s needs repair: %s", src.name, "; ".join(problems))
         out = workdir / "v1.mp4"
-        base = ["-i", str(src), "-map", "0:v:0", "-map", "0:a:0?"]
         done = False
-        if ok:
-            try:
-                await run_ffmpeg(*base, "-c", "copy", "-movflags", "+faststart", str(out))
-                done = True
-            except RuntimeError as exc:
-                log.warning("remux failed: %s", exc)
+        if codecs_ok:
+            done = await _lossless_remux(src, out)
+            if done:
+                # the remux is only a repair: never accept a clearly broken result (too short / no keyframes)
+                _, _, _, _, dur2 = _streams(await _probe(out))
+                gap = await _max_key_gap(out, float(dur2 or dur or 0))
+                too_short = bool(dur and dur2 and dur2 < dur * 0.97)
+                if too_short or (gap is not None and gap > MAX_KEY_GAP and (dur2 or dur or 0) > MAX_KEY_GAP):
+                    log.warning("remux unusable (short=%s, key gap=%s): re-encoding", too_short, gap)
+                    done = False
         if not done:
-            try:
-                async with TRANSCODE_SEM:
-                    await run_ffmpeg(
-                        *base, "-vf",
-                        "scale=w='min(1280,iw)':h='min(1280,ih)':"
-                        "force_original_aspect_ratio=decrease:force_divisible_by=2",
-                        "-c:v", "libx264", "-preset", "superfast", "-crf", "25", "-threads", "2",
-                        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
-                        "-movflags", "+faststart", str(out),
-                    )
-                done = True
-            except RuntimeError as exc:
-                log.warning("re-encode failed: %s", exc)
+            done = await _transcode(src, out, keyframes=True)
         if done:
             changed = True
         else:
             out = src  # last resort: send untouched
-        thumb_task = asyncio.create_task(_thumb(out, workdir / "t1.jpg"))
+    else:
+        # container looks healthy, but check the seek points of really long gaps anyway (cheap)
+        gap = await _max_key_gap(src, float(dur or 0))
+        if gap is not None and gap > MAX_KEY_GAP and (dur or 0) > MAX_KEY_GAP:
+            log.info("video %s has a %.0fs keyframe gap: re-encoding for seekability", src.name, gap)
+            out = workdir / "v1.mp4"
+            if await _transcode(src, out, keyframes=True):
+                changed = True
+            else:
+                out = src
 
+    thumb_task = asyncio.create_task(_thumb(out, workdir / "t1.jpg"))
     if changed:  # real size/duration of the file we will send
         _, _, w2, h2, dur2 = _streams(await _probe(out))
         w, h, dur = w2 or w, h2 or h, dur2 or dur
